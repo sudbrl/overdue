@@ -134,7 +134,7 @@ def build_report(file_obj):
         report_lines.append({
             'Due Date': due_dt,
             'Interest Due': round(row['interest_due'], 2),
-            'Paid Dates': ' || '.join(used) if used else '—',
+            'Paid Dates': ' – '.join(used) if used else '—',
             'Amount Paid': round(paid, 2),
             'Balance Due': balance,
             'Overdue_Days': overdue_days,
