@@ -256,7 +256,7 @@ st.markdown("""
 st.markdown('<div class="main-header"><h2>Payment Due Report Generator</h2></div>', unsafe_allow_html=True)
 
 uploaded_files = st.file_uploader(
-    'Upload Excel files (Sheet1)',
+    'Upload Excel files - Multiple allowed',
     type=['xlsx'],
     accept_multiple_files=True
 )
