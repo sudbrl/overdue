@@ -1,6 +1,17 @@
 # ------------------------------------------------------------------
 #  STREAMLIT UI  (professional multi-file look)
 # ------------------------------------------------------------------
+
+import streamlit as st  #  <-- this line must be the first executable line
+import pandas as pd
+from datetime import datetime, timedelta
+import io
+from pathlib import Path
+import openpyxl
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
+import tempfile, os, shutil  # the extras we added for clean-up
+
 st.set_page_config(page_title="Payment Due Report", layout="wide")
 
 st.markdown("""
