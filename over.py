@@ -1,13 +1,11 @@
-# streamlit_app.py
-##############################################################################
-#  LOGIN + PAYMENT-DUE-REPORT (no-preview)  –  GitHub-ready
-##############################################################################
-
 import streamlit as st
 import pandas as pd
-from pathlib import Path
 from datetime import datetime, timedelta
 import io
+from pathlib import Path
+import openpyxl
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 
 # ------------------------------------------------------------------
 #  HIDE STREAMLIT UI ELEMENTS
@@ -20,8 +18,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-###############################################################################
-# -------------------------  LOGIN PAGE  --------------------------------------
+# ------------------------------------------------------------------
+#  LOGIN PAGE
+# ------------------------------------------------------------------
 def login_page():
     st.markdown(""" 
         <style>
@@ -59,8 +58,9 @@ def login_page():
         else:
             st.error("Invalid username or password.")
 
-###############################################################################
-# -------------------------  APP ENTRY POINT  ---------------------------------
+# ------------------------------------------------------------------
+#  AUTH GATE
+# ------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -68,26 +68,46 @@ if not st.session_state["authenticated"]:
     login_page()
     st.stop()
 
-###############################################################################
-# -------------------------  SIDEBAR LOGOUT  ----------------------------------
+# ------------------------------------------------------------------
+#  SIDEBAR LOGOUT
+# ------------------------------------------------------------------
 with st.sidebar:
     if st.button("Logout"):
         st.session_state["authenticated"] = False
         st.rerun()
 
-###############################################################################
-# -------------------------  REPORT GENERATOR  --------------------------------
-def build_report(file_obj):
+# ------------------------------------------------------------------
+#  REPORT ENGINE
+# ------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def build_report(file_bytes):
     TODAY     = pd.Timestamp.today().normalize()
-    YESTERDAY = TODAY - pd.Timedelta(days=1)
+    YESTERDAY = TODAY - timedelta(days=1)
 
-    df = pd.read_excel(file_obj)
-    df.columns = df.columns.str.strip().str.lower()
+    df = pd.read_excel(io.BytesIO(file_bytes))
+    # normalise headers
+    df.columns = (df.columns
+                  .str.strip()
+                  .str.replace('\u00A0',' ')
+                  .str.lower()
+                  .str.replace(' ','_'))
+
     df['date'] = pd.to_datetime(df['date'], dayfirst=True)
     df['interest'] = pd.to_numeric(df['interest'], errors='coerce')
 
-    calc_df = df[df['nature'].str.upper() == 'CALC'].copy().sort_values('date')
-    post_df = df[df['nature'].str.upper() == 'POST'].copy().sort_values('date')
+    calc_df = df[df['nature'].str.upper().eq('CALC')].copy().sort_values('date')
+    post_df = df[df['nature'].str.upper().eq('POST')].copy().sort_values('date')
+
+    if calc_df.empty or post_df.empty:
+        return pd.DataFrame([{
+            'Due Date': 'No CALC or POST rows',
+            'Interest Due': 0,
+            'Paid Dates': '',
+            'Amount Paid': 0,
+            'Balance Due': 0,
+            'Overdue_Days': '',
+            'Status': ''
+        }])
 
     payments  = (-post_df['interest']).tolist()
     pay_dates = post_df['date'].dt.date.tolist()
@@ -103,13 +123,14 @@ def build_report(file_obj):
     for due_10 in all_10ths:
         prev_11 = (due_10.replace(day=11) - timedelta(days=30)).replace(day=11)
         mask = (calc_df['date'] >= prev_11) & (calc_df['date'] <= due_10)
-        monthly_rows.append({'due_date': due_10.date(),
-                             'interest_due': round(calc_df.loc[mask, 'interest'].sum(), 2)})
+        monthly_rows.append({
+            'due_date': due_10.date(),
+            'interest_due': round(calc_df.loc[mask, 'interest'].sum(), 2)
+        })
 
     # apply payments
     report_lines = []
-    rem_pays = payments.copy()
-    rem_dates = pay_dates.copy()
+    rem_pays, rem_dates = payments.copy(), pay_dates.copy()
 
     for row in monthly_rows:
         due_dt, due_amt = row['due_date'], row['interest_due']
@@ -129,12 +150,12 @@ def build_report(file_obj):
 
         balance = round(row['interest_due'] - paid, 2)
         status  = '✅ Fully Paid' if balance < 1e-2 else '❌ Outstanding'
-        overdue_days = (YESTERDAY - pd.Timestamp(due_dt)).days if balance >= 1e-2 else ''
+        overdue_days = max(0, (YESTERDAY - pd.Timestamp(due_dt)).days) if balance >= 1e-2 else ''
 
         report_lines.append({
             'Due Date': due_dt,
             'Interest Due': round(row['interest_due'], 2),
-            'Paid Dates': ' – '.join(used) if used else '—',
+            'Paid Dates': ' || '.join(used) if used else '—',
             'Amount Paid': round(paid, 2),
             'Balance Due': balance,
             'Overdue_Days': overdue_days,
@@ -169,11 +190,45 @@ def build_report(file_obj):
 
     return pd.DataFrame(report_lines)
 
-###############################################################################
-# -------------------------  UI AFTER LOGIN  ----------------------------------
+# ------------------------------------------------------------------
+#  EXCEL STYLER
+# ------------------------------------------------------------------
+def style_excel(df: pd.DataFrame) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Report')
+        ws = writer.sheets['Report']
+
+        # formats
+        bold = Font(bold=True)
+        currency = u'#,##0.00_);[Red](#,##0.00)'
+        left_align = Alignment(horizontal='left')
+
+        # column widths
+        for idx, col in enumerate(df.columns, 1):
+            max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
+            ws.column_dimensions[get_column_letter(idx)].width = min(max_len, 50)
+
+        # styling
+        for row in range(2, len(df) + 2):
+            ws.cell(row, 1).alignment = left_align   # Due Date
+            for col_idx in [2, 4, 5]:                # Interest, Paid, Balance
+                cell = ws.cell(row, col_idx)
+                cell.number_format = currency
+                if df.iloc[row-2, 0] == 'Total':
+                    cell.font = bold
+        # bold total row
+        for col in range(1, len(df.columns)+1):
+            ws.cell(len(df)+1, col).font = bold
+
+    buffer.seek(0)
+    return buffer
+
+# ------------------------------------------------------------------
+#  STREAMLIT UI
+# ------------------------------------------------------------------
 st.set_page_config(page_title='Payment Due Report', layout='centered')
 
-# ---- same styling as fullreport.streamlit.app ----
 st.markdown("""
 <style>
     .block-container { max-width: 720px; margin: auto; }
@@ -189,21 +244,26 @@ st.markdown("""
 
 st.markdown('<div class="main-header"><h2>Payment Due Report Generator</h2></div>', unsafe_allow_html=True)
 
-uploaded = st.file_uploader('Upload Excel file (Sheet1)', type=['xlsx'])
+uploaded_files = st.file_uploader(
+    'Upload Excel files (Sheet1)',
+    type=['xlsx'],
+    accept_multiple_files=True
+)
 
-if uploaded:
-    try:
-        df_out = build_report(uploaded)
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as w:
-            df_out.to_excel(w, index=False)
-        buffer.seek(0)
+if uploaded_files:
+    if len(uploaded_files) > 10:
+        st.error('You can upload a maximum of 10 files at once.')
+        st.stop()
 
-        st.download_button(
-            label='📥 Download Payment_Due_Report.xlsx',
-            data=buffer,
-            file_name='Payment_Due_Report.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except Exception as e:
-        st.error(f'Processing failed: {e}')
+    for upl in uploaded_files:
+        try:
+            df_out = build_report(upl.getvalue())
+            excel_bytes = style_excel(df_out)
+            st.download_button(
+                label=f'📥 {Path(upl.name).stem}_Payment_Due_Report.xlsx',
+                data=excel_bytes,
+                file_name=f'{Path(upl.name).stem}_Payment_Due_Report.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+        except Exception as e:
+            st.error(f'Processing {upl.name} failed: {e}')
